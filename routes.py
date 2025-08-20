@@ -1,11 +1,14 @@
 from fastapi import APIRouter
-from models import WeatherZoneRequest, VoltageRequest, VoltageResponse, Employee
+from models import WeatherZoneRequest, VoltageRequest, VoltageResponse, Employee, EmployeeDB
 from voltage import translate_voltage
 from weatherzone import translate_weatherzone
 from get_weatherzone import get_weatherzone
 import csv
 from typing import Dict, List
-from fastapi import HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.future import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import SessionLocal
 
 
 router = APIRouter()
@@ -65,61 +68,66 @@ def add_voltage_entry(
         return {"error": str(e)}
 
 
+async def get_db():
+    async with SessionLocal() as session:
+        yield session
 
-employees = []  
 
 @router.post("/employees/")
-def add_employees(new_employees: List[Employee]):
-    try:
-        for employee in new_employees:
-  
-            if any(existing.id == employee.id for existing in employees):
-                raise HTTPException(status_code=400, detail=f"Employee with ID {employee.id} already exists")
-            employees.append(employee)
-        return {"message": "Employees added successfully", "employees": employees}
-    except HTTPException as e:
-        raise e
-
+async def add_employee(employee: Employee, db: AsyncSession = Depends(get_db)):
+    db_employee = EmployeeDB(
+        emp_id=employee.emp_id,
+        emp_name=employee.emp_name,
+        department=employee.department,
+        salary=employee.salary,
+        email=employee.email,
+    )
+    db.add(db_employee)
+    await db.commit()
+    await db.refresh(db_employee)
+    return db_employee
 
 
 @router.get("/employees/")
-def get_all_employees():
-    try:
-        return employees
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_all_employees(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeDB))
+    employees = result.scalars().all()
+    return employees
 
 
 @router.get("/employees/{employee_id}")
-def get_employee(employee_id: int):
-    try:
-        if employee_id not in [emp.id for emp in employees]:
-            raise HTTPException(status_code=404, detail="Employee not found")
-        return next(emp for emp in employees if emp.id == employee_id)
-    except HTTPException as e:
-        raise e
+async def get_employee(employee_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeDB).where(EmployeeDB.emp_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return employee
+
+
+@router.put("/employees/{employee_id}")
+async def update_employee(employee_id: int, updated_employee: Employee, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeDB).where(EmployeeDB.emp_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    employee.emp_name = updated_employee.emp_name
+    employee.department = updated_employee.department
+    employee.salary = updated_employee.salary
+    employee.email = updated_employee.email
+
+    await db.commit()
+    await db.refresh(employee)
+    return employee
 
 
 @router.delete("/employees/{employee_id}")
-def delete_employee(employee_id: int):
-    try:
-        for i, emp in enumerate(employees):
-            if emp.id == employee_id:
-                del employees[i]   
-                return {"message": "Employee deleted successfully"}
-            raise HTTPException(status_code=404, detail="Employee not found")   
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.put("/employees/{employee_id}")
-def update_employee(employee_id: int, employee: Employee):
-    try:
-        for i, emp in enumerate(employees):
-            if emp.id == employee_id:
-                employees[i] = employee
-                return {"message": "Employee updated successfully", "employee": employee}
+async def delete_employee(employee_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeDB).where(EmployeeDB.emp_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-    except HTTPException as e:
-        raise e
 
-    
+    await db.delete(employee)
+    await db.commit()
+    return {"message": "Employee deleted successfully"}
